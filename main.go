@@ -41,12 +41,10 @@ type drugInfo struct {
 func main() {
 	urls := getUrls()
 	getDrugInfo(urls)
-	// Add to Meilisearch here
 }
 
 func getDrugInfo(urls []drugUrl) {
 	drugs := []drugInfo{}
-
 	c := colly.NewCollector(
 		colly.Async(true),
 		//colly.Debugger(&debug.LogDebugger{}),
@@ -61,6 +59,7 @@ func getDrugInfo(urls []drugUrl) {
 		tmpDrug := drugInfo{}
 		h.ForEach(".row-fluid", func(_ int, el *colly.HTMLElement) {
 			tempKey := el.ChildText(".span2")
+
 			switch tempKey {
 			case "Име на лекот (кирилица):":
 				tmpDrug.CyrillicName = el.ChildText(".span6")
@@ -110,7 +109,6 @@ func getDrugInfo(urls []drugUrl) {
 				tmpDrug.SummaryReport = el.ChildAttr(".span6 > a", "href")
 			}
 		})
-
 		drugs = append(drugs, tmpDrug)
 	})
 
@@ -121,10 +119,13 @@ func getDrugInfo(urls []drugUrl) {
 
 	c.Wait()
 	d, err := json.Marshal(drugs)
+
 	if err != nil {
 		fmt.Printf("Error: %s", err)
+
 		return
 	}
+
 	fmt.Println(string(d))
 	fmt.Printf("Found %d drugs", len(drugs))
 }
@@ -138,7 +139,6 @@ func getUrls() []drugUrl {
 		h.ForEach("tr", func(_ int, el *colly.HTMLElement) {
 			temp := drugUrl{}
 			temp.Url = "https://lekovi.zdravstvo.gov.mk" + el.ChildAttr("td:nth-child(2) > a", "href")
-
 			urls = append(urls, temp)
 		})
 	})
