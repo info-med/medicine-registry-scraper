@@ -187,7 +187,6 @@ func getUrls(pageUrl string) []drugUrl {
 		resp.Request.Retry()
 	})
 	c.SetRequestTimeout(60 * time.Second)
-	//c.SetProxy("http://brd-customer-hl_40b6b5a3-zone-isp:n71so9woyo84@brd.superproxy.io:22225")
 	extensions.RandomUserAgent(c)
 	err := c.Limit(&colly.LimitRule{
 		DomainRegexp: `lekovi.zdravstvo.gov\.mk`,
