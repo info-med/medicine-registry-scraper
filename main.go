@@ -3,8 +3,12 @@ package main
 import (
 	"fmt"
 	"github.com/gocolly/colly/v2"
+	"sync"
 	//"github.com/gocolly/colly/v2/debug"
-	"encoding/json"
+	"github.com/gocolly/colly/v2/extensions"
+	"github.com/google/uuid"
+	"github.com/meilisearch/meilisearch-go"
+	"strconv"
 	"time"
 )
 
@@ -13,6 +17,7 @@ type drugUrl struct {
 }
 
 type drugInfo struct {
+	Id                   string
 	CyrillicName         string
 	LatinName            string
 	GenericName          string
@@ -39,22 +44,65 @@ type drugInfo struct {
 }
 
 func main() {
-	urls := getUrls()
-	getDrugInfo(urls)
+	meilisearchClient := meilisearch.NewClient(meilisearch.ClientConfig{
+		Host: "http://127.0.0.1:7700",
+	})
+	wg := sync.WaitGroup{}
+	queue := make(chan struct{}, 50)
+
+	for i := 1; i < 3929; i++ {
+		queue <- struct{}{}
+		wg.Add(1)
+
+		pageUrl := "https://lekovi.zdravstvo.gov.mk/drugsregister.grid.pager/" + strconv.Itoa(i) + "/grid_0?t:ac=overview"
+		fmt.Println("Querying page", i)
+		go doSearch(pageUrl, meilisearchClient, &wg, queue)
+	}
+
+	wg.Wait()
+	close(queue)
 }
 
-func getDrugInfo(urls []drugUrl) {
+func doSearch(pageUrl string, meilisearchClient *meilisearch.Client, wg *sync.WaitGroup, queue chan struct{}) {
+	defer func() {
+		<-queue
+		wg.Done()
+	}()
+
+	scrapedUrls := getUrls(pageUrl)
+
+	for {
+		if len(scrapedUrls) != 10 {
+			fmt.Println("Retrying", pageUrl)
+			time.Sleep(5000 * time.Millisecond)
+			scrapedUrls = getUrls(pageUrl)
+		} else {
+			getDrugInfo(scrapedUrls, meilisearchClient)
+			break
+		}
+	}
+}
+
+func getDrugInfo(urls []drugUrl, meilisearchClient *meilisearch.Client) {
 	drugs := []drugInfo{}
 	c := colly.NewCollector(
 		colly.Async(true),
-		//colly.Debugger(&debug.LogDebugger{}),
 	)
+	c.SetRequestTimeout(60 * time.Second)
 	c.OnError(func(resp *colly.Response, err error) {
+		fmt.Println(err)
 		resp.Request.Retry()
 	})
-	c.Limit(&colly.LimitRule{
-		Delay: 1 * time.Second,
+	extensions.RandomUserAgent(c)
+	err := c.Limit(&colly.LimitRule{
+		DomainRegexp: `lekovi.zdravstvo.gov\.mk`,
+		RandomDelay:  5 * time.Second,
+		Parallelism:  12,
 	})
+	if err != nil {
+		fmt.Println(err)
+	}
+
 	c.OnHTML(".tab-content", func(h *colly.HTMLElement) {
 		tmpDrug := drugInfo{}
 		h.ForEach(".row-fluid", func(_ int, el *colly.HTMLElement) {
@@ -109,32 +157,47 @@ func getDrugInfo(urls []drugUrl) {
 				tmpDrug.SummaryReport = el.ChildAttr(".span6 > a", "href")
 			}
 		})
+		tmpDrug.Id = uuid.NewString()
 		drugs = append(drugs, tmpDrug)
 	})
 
 	for _, url := range urls {
-		fmt.Println("Visited " + url.Url)
 		c.Visit(url.Url)
 	}
 
 	c.Wait()
-	d, err := json.Marshal(drugs)
 
-	if err != nil {
-		fmt.Printf("Error: %s", err)
-
-		return
-	}
-
-	fmt.Println(string(d))
-	fmt.Printf("Found %d drugs", len(drugs))
+	saveToMeilisearch(drugs, meilisearchClient)
 }
 
-func getUrls() []drugUrl {
+func saveToMeilisearch(drugs []drugInfo, meilisearchClient *meilisearch.Client) {
+	evidenceIndex := meilisearchClient.Index("drug-registry")
+
+	_, err := evidenceIndex.AddDocuments(drugs)
+	if err != nil {
+		fmt.Println(err)
+		panic("Error")
+	}
+}
+
+func getUrls(pageUrl string) []drugUrl {
 	urls := []drugUrl{}
-	c := colly.NewCollector(
-		colly.AllowedDomains("lekovi.zdravstvo.gov.mk"),
-	)
+	c := colly.NewCollector()
+	c.OnError(func(resp *colly.Response, err error) {
+		resp.Request.Retry()
+	})
+	c.SetRequestTimeout(60 * time.Second)
+	//c.SetProxy("http://brd-customer-hl_40b6b5a3-zone-isp:n71so9woyo84@brd.superproxy.io:22225")
+	extensions.RandomUserAgent(c)
+	err := c.Limit(&colly.LimitRule{
+		DomainRegexp: `lekovi.zdravstvo.gov\.mk`,
+		RandomDelay:  5 * time.Second,
+		Parallelism:  12,
+	})
+
+	if err != nil {
+		fmt.Println(err)
+	}
 	c.OnHTML("tbody", func(h *colly.HTMLElement) {
 		h.ForEach("tr", func(_ int, el *colly.HTMLElement) {
 			temp := drugUrl{}
@@ -142,7 +205,7 @@ func getUrls() []drugUrl {
 			urls = append(urls, temp)
 		})
 	})
-	c.Visit("https://lekovi.zdravstvo.gov.mk/drugsregister/overview")
+	c.Visit(pageUrl)
 
 	return urls
 }
